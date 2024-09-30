@@ -40,7 +40,7 @@ def record_points(evt: gr.SelectData):
     return marked_image
 
 # 执行仿射变换
-def point_guided_deformation(image, source_pts, target_pts, alpha=1000, eps=1e-8):
+def point_guided_deformation(image, source_pts, target_pts, alpha=1, eps=1e-8):
     d = 20000
     # 基本图像操作
     h, w, _ = image.shape
