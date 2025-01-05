@@ -3,6 +3,7 @@ from PIL import ImageDraw
 import numpy as np
 import torch
 import torch.nn.functional as F
+import cv2
 
 # Initialize the polygon state
 def initialize_polygon():
@@ -110,62 +111,7 @@ def create_mask_from_points(points, img_h, img_w):
     ### FILL: Obtain Mask from Polygon Points. 
     ### 0 indicates outside the Polygon.
     ### 255 indicates inside the Polygon.
-
-    def draw_line(x1, y1, x2, y2):
-        points = []
-        dx = abs(x2 - x1)
-        dy = abs(y2 - y1)
-        sx = 1 if x1 < x2 else -1
-        sy = 1 if y1 < y2 else -1
-        err = dx - dy
-
-        while True:
-            points.append((x1, y1))
-            if x1 == x2 and y1 == y2:
-                break
-            err2 = err * 2
-            if err2 > -dy:
-                err -= dy
-                x1 += sx
-            if err2 < dx:
-                err += dx
-                y1 += sy
-        return points
-
-    # 将多边形的边界线绘制到掩码上
-    n = len(points)
-    # for i in range(n):
-    #     x1, y1 = points[i]
-    #     x2, y2 = points[(i + 1) % n]  # 连接最后一个点和第一个点
-    #     line_points = draw_line(x1, y1, x2, y2)
-    #     for x, y in line_points:
-    #         if 0 <= x < img_h and 0 <= y < img_w:
-    #             mask[x, y] = 255  # 设置边界为255
-    #
-    # # 使用填充算法填充多边形内部
-    # for x in range(img_h):
-    #     inside = False
-    #     for y in range(img_w):
-    #         if mask[x, y] == 255:
-    #             inside = not inside  # 切换inside状态
-    #         if inside:
-    #             mask[x, y] = 255  # 填充内部区域
-    for i in range(n):
-        x1, y1 = points[i]
-        x2, y2 = points[(i + 1) % n]  # 连接最后一个点和第一个点
-        line_points = draw_line(x1, y1, x2, y2)
-        for x, y in line_points:
-            if 0 <= x < img_w and 0 <= y < img_h:
-                mask[y, x] = 255  # 设置边界为255
-
-        # 使用填充算法填充多边形内部
-    for y in range(img_h):
-        inside = False
-        for x in range(img_w):
-            if mask[y, x] == 255:
-                inside = not inside  # 切换inside状态
-            if inside:
-                mask[y, x] = 255  # 填充内部区域
+    cv2.fillPoly(mask, [np.array(points, dtype=np.int32)], color=255)
 
     return mask
 
@@ -182,27 +128,37 @@ def cal_laplacian_loss(foreground_img, foreground_mask, blended_img, background_
 
     Returns:
         torch.Tensor: The computed Laplacian loss.
+        loss = torch.tensor(0.0, device=foreground_img.device)
+    ### FILL: Compute Laplacian Loss with https://pytorch.org/docs/stable/generated/torch.nn.functional.conv2d.html.
+    ### Note: The loss is computed within the masks.
     """
-    loss = torch.tensor(0.0, device=foreground_img.device)
     # 定义拉普拉斯核，并扩展到3个通道
-    laplacian_kernel = torch.tensor([[0, 1, 0],
-                                     [1, -4, 1],
+    laplacian_kernel = torch.tensor([[0, 1, 0], 
+                                     [1, -4, 1], 
                                      [0, 1, 0]], dtype=torch.float32, device=foreground_img.device).view(1, 1, 3, 3)
-    laplacian_kernel = laplacian_kernel.expand(3, 1, 3, 3)
+    laplacian_kernel = laplacian_kernel.expand(3, 1, 3, 3)  # 变成 [3, 1, 3, 3]
 
     # 应用拉普拉斯核
     foreground_laplacian = F.conv2d(foreground_img, laplacian_kernel, padding=1, groups=3)
     blended_laplacian = F.conv2d(blended_img, laplacian_kernel, padding=1, groups=3)
 
+
     # Compute the difference between Laplacians and apply masks
     blended_laplacian = F.interpolate(blended_laplacian, size=foreground_laplacian.shape[2:])
-    energy = (foreground_laplacian - blended_laplacian) ** 2
+    laplacian_diff = (foreground_laplacian - blended_laplacian) ** 2
+    
+    # Combine the foreground and background masks
+    # Ensure masks are boolean or integer type for bitwise operation
+    background_mask = F.interpolate(background_mask, size=foreground_mask.shape[2:])
+    combined_mask = foreground_mask.bool() & background_mask.bool()  # or .int() if preferred
 
+    # Calculate masked loss
+    masked_loss = laplacian_diff * combined_mask.float()  # Convert combined_mask back to float
 
-    loss = (energy * foreground_mask.float()) .sum()/ foreground_mask.sum()
+    # Sum the loss over the masked region and normalize by the number of active pixels in the mask
+    loss = masked_loss.sum() / combined_mask.sum()
 
     return loss
-
 
 
 # Perform Poisson image blending
@@ -252,7 +208,7 @@ def blending(foreground_image_original, background_image_original, dx, dy, polyg
     optimizer = torch.optim.Adam([blended_img], lr=1e-3)
 
     # Optimization loop
-    iter_num = 1000
+    iter_num = 10000
     for step in range(iter_num):
         blended_img_for_loss = blended_img.detach() * (1. - bg_mask_tensor) + blended_img * bg_mask_tensor  # Only blending in the mask region
 
